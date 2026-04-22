@@ -1,486 +1,279 @@
 """
-renderer.py — Professional 2D Floor Plan Renderer
-==================================================
-Matplotlib pe based production-quality floor plan rendering.
-
-Features:
-  - Proper room polygons with wall thickness
-  - Direction-based rotation
-  - Realistic door arcs (hinge + swing)
-  - Window symbols (double line + glass)
-  - Dimension annotations
-  - North arrow compass
-  - Room area labels
-  - Professional architectural styling
+renderer.py — Professional Architectural Floor Plan Renderer v2
+================================================================
+Realistic walls, proper door arcs, window symbols, dimensions.
+Clean architectural style — not a child's drawing.
 """
-
 from __future__ import annotations
-import math
-import io
-from typing import Dict, List, Optional, Tuple
-
+import math, io
+from typing import Dict, List, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.patches import FancyArrowPatch, Arc, Rectangle, Polygon, FancyBboxPatch
+from matplotlib.patches import Polygon, Arc, FancyArrowPatch
 from matplotlib.lines import Line2D
-from matplotlib.patheffects import withStroke
-import matplotlib.patheffects as pe
-from matplotlib.gridspec import GridSpec
 
-from vastu import audit_layout, overall_vastu_score
+# ── Style Constants ──────────────────────────────────────────────
+WALL_C   = "#1C2833"
+WALL_LW  = 4.0
+THIN_LW  = 1.5
+DOOR_C   = "#784212"
+WIN_C    = "#1A5276"
+DIM_C    = "#626567"
+GRID_C   = "#D5D8DC"
+BG_C     = "#FDFEFE"
+TEXT_C   = "#17202A"
+NORTH_C  = "#C0392B"
 
+def _rot(x, y, cx, cy, a):
+    r = math.radians(a)
+    dx, dy = x-cx, y-cy
+    return cx+dx*math.cos(r)-dy*math.sin(r), cy+dx*math.sin(r)+dy*math.cos(r)
 
-# ─────────────────────────────────────────────────────────────────
-# Color & Style Constants
-# ─────────────────────────────────────────────────────────────────
+def _rot_corners(corners, cx, cy, a):
+    return [_rot(x, y, cx, cy, a) for x,y in corners]
 
-WALL_COLOR      = "#2C3E50"
-WALL_LW         = 3.5
-DOOR_COLOR      = "#8B4513"
-DOOR_LW         = 2.0
-WINDOW_COLOR    = "#1A6EA3"
-WINDOW_LW       = 3.5
-LABEL_COLOR     = "#1a1a2e"
-DIM_COLOR       = "#555555"
-COMPASS_RED     = "#C0392B"
-BG_COLOR        = "#FAFAFA"
-GRID_COLOR      = "#E0E0E0"
-
-FONT_ROOM       = {"size": 8,  "weight": "bold",   "family": "DejaVu Sans"}
-FONT_AREA       = {"size": 6.5,"style":  "italic",  "family": "DejaVu Sans"}
-FONT_DIM        = {"size": 7,  "weight": "normal",  "family": "DejaVu Sans Mono"}
-FONT_TITLE      = {"size": 14, "weight": "bold",    "family": "DejaVu Sans"}
-FONT_SUBTITLE   = {"size": 9,  "weight": "normal",  "family": "DejaVu Sans"}
+def _rect_pts(x,y,w,h):
+    return [(x,y),(x+w,y),(x+w,y+h),(x,y+h)]
 
 
-# ─────────────────────────────────────────────────────────────────
-# Geometry Utilities
-# ─────────────────────────────────────────────────────────────────
+# ── Room ─────────────────────────────────────────────────────────
+def _draw_room(ax, r, cx, cy, angle):
+    x,y,w,h = r["x"],r["y"],r["w"],r["h"]
+    pts = _rot_corners(_rect_pts(x,y,w,h), cx, cy, angle)
 
-def _rotate_point(x: float, y: float, cx: float, cy: float,
-                  angle_deg: float) -> Tuple[float, float]:
-    rad = math.radians(angle_deg)
-    dx, dy = x - cx, y - cy
-    return (
-        cx + dx * math.cos(rad) - dy * math.sin(rad),
-        cy + dx * math.sin(rad) + dy * math.cos(rad),
-    )
-
-
-def _rotate_corners(corners: List[Tuple], cx: float, cy: float,
-                    angle: float) -> List[Tuple]:
-    return [_rotate_point(x, y, cx, cy, angle) for x, y in corners]
-
-
-def _rect_corners(x, y, w, h) -> List[Tuple]:
-    return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-
-
-# ─────────────────────────────────────────────────────────────────
-# Drawing Primitives
-# ─────────────────────────────────────────────────────────────────
-
-def _draw_room(ax, room: Dict, cx: float, cy: float, angle: float, wall_lw: float):
-    """Room rectangle draw karo — rotated polygon as filled patch"""
-    x, y, w, h = room["x"], room["y"], room["w"], room["h"]
-    color = room.get("color", "#f0f0f0")
-
-    corners = _rect_corners(x, y, w, h)
-    rot_corners = _rotate_corners(corners, cx, cy, angle)
-
-    poly = Polygon(
-        rot_corners,
-        closed=True,
-        facecolor=color,
-        edgecolor=WALL_COLOR,
-        linewidth=wall_lw,
-        alpha=0.88,
-        zorder=2,
-    )
+    # Fill
+    poly = Polygon(pts, closed=True, facecolor=r.get("color","#f0f0f0"),
+                   edgecolor=WALL_C, lw=WALL_LW, alpha=0.90, zorder=2)
     ax.add_patch(poly)
 
-    # Room label
-    rcx = sum(p[0] for p in rot_corners) / 4
-    rcy = sum(p[1] for p in rot_corners) / 4
+    # Room label + area
+    rcx = sum(p[0] for p in pts)/4
+    rcy = sum(p[1] for p in pts)/4
+    label = r.get("label","")
+    area  = r["w"]*r["h"]
 
-    label = room.get("label", "")
-    area  = room["w"] * room["h"]
+    # Icon per type
+    icons = {"living":"⬛","bedroom":"⬛","kitchen":"⬛","bathroom":"⬛",
+             "balcony":"⬛","pooja":"⬛","dining":"⬛","passage":"⬛","utility":"⬛"}
 
-    # Multi-line label: name + area
-    ax.text(
-        rcx, rcy + 0.5, label,
-        ha="center", va="center",
-        fontsize=FONT_ROOM["size"],
-        fontweight=FONT_ROOM["weight"],
-        color=LABEL_COLOR,
-        zorder=5,
-        wrap=True,
-        path_effects=[withStroke(linewidth=2, foreground="white")]
-    )
-    ax.text(
-        rcx, rcy - 0.9,
-        f"{area:.0f} sq ft",
-        ha="center", va="center",
-        fontsize=FONT_AREA["size"],
-        fontstyle=FONT_AREA["style"],
-        color="#555555",
-        zorder=5,
-    )
+    ax.text(rcx, rcy+0.6, label, ha="center", va="center",
+            fontsize=8.5, fontweight="bold", color=TEXT_C, zorder=6,
+            bbox=dict(boxstyle="round,pad=0.15",facecolor="white",edgecolor="none",alpha=0.75))
+    ax.text(rcx, rcy-0.9, f"{area:.0f} sq ft",
+            ha="center", va="center", fontsize=6.5,
+            color="#555", style="italic", zorder=6)
 
 
-def _draw_door(ax, door: Dict, room: Dict, cx: float, cy: float,
-               angle: float, door_size: float = 3.0):
-    """
-    Architectural door symbol:
-    - Thin line = door panel
-    - Quarter-circle arc = swing arc
-    """
-    wall = door.get("wall", "bottom")
-    dx   = door.get("x", room["x"])
-    dy   = door.get("y", room["y"])
-    dw   = door.get("width", door_size)
-    dtype = door.get("type", "internal")
+# ── Door ─────────────────────────────────────────────────────────
+def _draw_door(ax, door, cx, cy, angle):
+    wall  = door.get("wall","bottom")
+    dx    = door.get("x", 0)
+    dy    = door.get("y", 0)
+    dw    = door.get("width", 3.0)
+    dtype = door.get("type","internal")
+    color = "#8B0000" if dtype=="main" else DOOR_C
+    lw    = 2.8 if dtype=="main" else 1.8
 
-    color = "#8B0000" if dtype == "main" else DOOR_COLOR
-    lw    = 2.5 if dtype == "main" else 1.8
-
-    # Hinge point aur swing direction
+    # Hinge point and end point based on wall
     if wall == "bottom":
-        hx, hy   = dx, dy
-        ex, ey   = dx + dw, dy         # door end
-        arc_theta1, arc_theta2 = 0, 90
-        arc_cx, arc_cy = hx, hy
+        hx,hy = dx,dy;      ex,ey = dx+dw,dy
+        a1,a2 = 0,90;       acx,acy = hx,hy
     elif wall == "top":
-        hx, hy   = dx, dy
-        ex, ey   = dx + dw, dy
-        arc_theta1, arc_theta2 = 270, 360
-        arc_cx, arc_cy = hx, hy
+        hx,hy = dx,dy;      ex,ey = dx+dw,dy
+        a1,a2 = 270,360;    acx,acy = hx,hy
     elif wall == "left":
-        hx, hy   = dx, dy
-        ex, ey   = dx, dy + dw
-        arc_theta1, arc_theta2 = 0, 90
-        arc_cx, arc_cy = hx, hy
+        hx,hy = dx,dy;      ex,ey = dx,dy+dw
+        a1,a2 = 0,90;       acx,acy = hx,hy
     else:  # right
-        hx, hy   = dx, dy
-        ex, ey   = dx, dy + dw
-        arc_theta1, arc_theta2 = 90, 180
-        arc_cx, arc_cy = hx, hy
+        hx,hy = dx,dy;      ex,ey = dx,dy+dw
+        a1,a2 = 90,180;     acx,acy = hx,hy
 
-    # Rotate hinge, end, arc-centre
-    rhx, rhy = _rotate_point(hx, hy, cx, cy, angle)
-    rex, rey = _rotate_point(ex, ey, cx, cy, angle)
-    rax, ray = _rotate_point(arc_cx, arc_cy, cx, cy, angle)
+    rhx,rhy = _rot(hx,hy,cx,cy,angle)
+    rex,rey = _rot(ex,ey,cx,cy,angle)
+    rax,ray = _rot(acx,acy,cx,cy,angle)
 
-    # Door panel line
-    ax.plot([rhx, rex], [rhy, rey], color=color, lw=lw, solid_capstyle="round", zorder=4)
-
-    # Swing arc (approximated as small arc patch)
-    arc = Arc(
-        (rax, ray), width=dw * 2, height=dw * 2,
-        angle=angle,
-        theta1=arc_theta1, theta2=arc_theta2,
-        color=color, lw=1.2, linestyle="--", zorder=4
-    )
+    # Door panel
+    ax.plot([rhx,rex],[rhy,rey], color=color, lw=lw,
+            solid_capstyle="round", zorder=5)
+    # Swing arc
+    arc = Arc((rax,ray), dw*2, dw*2, angle=angle,
+              theta1=a1, theta2=a2,
+              color=color, lw=1.2, linestyle="--", zorder=5)
     ax.add_patch(arc)
 
 
-def _draw_window(ax, window: Dict, room: Dict, cx: float, cy: float, angle: float):
-    """
-    Architectural window symbol:
-    Double parallel line with glass infill
-    """
-    wall  = window.get("wall", "top")
-    wx    = window.get("x", room["x"])
-    wy    = window.get("y", room["y"])
-    ww    = window.get("width", 3.0)
-    wtype = window.get("type", "casement")
+# ── Window ───────────────────────────────────────────────────────
+def _draw_window(ax, win, cx, cy, angle):
+    wall = win.get("wall","top")
+    wx   = win.get("x",0)
+    wy   = win.get("y",0)
+    ww   = win.get("width",3.0)
+    g    = 0.4  # gap between double lines
 
-    gap   = 0.35   # gap between double lines
-
-    if wall in ("top", "bottom"):
-        # Horizontal window
-        p1 = (wx,      wy)
-        p2 = (wx + ww, wy)
-        p3 = (wx,      wy + gap)
-        p4 = (wx + ww, wy + gap)
-        fill_pts = [(wx, wy), (wx + ww, wy), (wx + ww, wy + gap), (wx, wy + gap)]
+    if wall in ("top","bottom"):
+        p1,p2 = (wx,wy),(wx+ww,wy)
+        p3,p4 = (wx,wy+g),(wx+ww,wy+g)
+        fill  = [(wx,wy),(wx+ww,wy),(wx+ww,wy+g),(wx,wy+g)]
     else:
-        # Vertical window
-        p1 = (wx,       wy)
-        p2 = (wx,       wy + ww)
-        p3 = (wx + gap, wy)
-        p4 = (wx + gap, wy + ww)
-        fill_pts = [(wx, wy), (wx + gap, wy), (wx + gap, wy + ww), (wx, wy + ww)]
+        p1,p2 = (wx,wy),(wx,wy+ww)
+        p3,p4 = (wx+g,wy),(wx+g,wy+ww)
+        fill  = [(wx,wy),(wx+g,wy),(wx+g,wy+ww),(wx,wy+ww)]
 
-    # Rotate all points
-    rp1 = _rotate_point(*p1, cx, cy, angle)
-    rp2 = _rotate_point(*p2, cx, cy, angle)
-    rp3 = _rotate_point(*p3, cx, cy, angle)
-    rp4 = _rotate_point(*p4, cx, cy, angle)
-    rfill = [_rotate_point(*p, cx, cy, angle) for p in fill_pts]
+    rfill = [_rot(p[0],p[1],cx,cy,angle) for p in fill]
+    rp1   = _rot(*p1,cx,cy,angle)
+    rp2   = _rot(*p2,cx,cy,angle)
+    rp3   = _rot(*p3,cx,cy,angle)
+    rp4   = _rot(*p4,cx,cy,angle)
 
-    # Glass fill
-    glass_poly = Polygon(rfill, facecolor="#AED6F1", edgecolor="none", alpha=0.5, zorder=3)
-    ax.add_patch(glass_poly)
-
-    # Double lines
-    ax.plot([rp1[0], rp2[0]], [rp1[1], rp2[1]], color=WINDOW_COLOR, lw=WINDOW_LW, solid_capstyle="round", zorder=4)
-    ax.plot([rp3[0], rp4[0]], [rp3[1], rp4[1]], color=WINDOW_COLOR, lw=1.2, solid_capstyle="round", zorder=4)
-
-    # Ventilation marker for small windows
-    if wtype == "ventilation":
-        mid = _rotate_point(wx + ww / 2, wy + gap / 2, cx, cy, angle)
-        ax.plot(*mid, "x", color=WINDOW_COLOR, ms=3, mew=1, zorder=5)
+    glass = Polygon(rfill, facecolor="#AED6F1", edgecolor="none", alpha=0.55, zorder=4)
+    ax.add_patch(glass)
+    ax.plot([rp1[0],rp2[0]],[rp1[1],rp2[1]], color=WIN_C, lw=3.0,
+            solid_capstyle="round", zorder=5)
+    ax.plot([rp3[0],rp4[0]],[rp3[1],rp4[1]], color=WIN_C, lw=1.2,
+            solid_capstyle="round", zorder=5)
 
 
-def _draw_north_arrow(ax, x: float, y: float, size: float = 4.0):
-    """Decorative North arrow compass"""
-    # Arrow body
-    ax.annotate(
-        "", xy=(x, y + size), xytext=(x, y),
-        arrowprops=dict(arrowstyle="->", color=COMPASS_RED, lw=2.5),
-        zorder=10
-    )
-    ax.text(x, y + size + 0.8, "N", ha="center", va="bottom",
-            fontsize=12, fontweight="bold", color=COMPASS_RED, zorder=10)
-    # Small circle at base
-    circle = plt.Circle((x, y), 0.5, color=COMPASS_RED, fill=True, zorder=10)
-    ax.add_patch(circle)
+# ── Dimension Line ───────────────────────────────────────────────
+def _dim(ax, x1,y1,x2,y2, label, offset=2.8):
+    mx,my = (x1+x2)/2,(y1+y2)/2
+    dx,dy = x2-x1,y2-y1
+    L     = math.hypot(dx,dy)
+    if L < 0.1: return
+    nx,ny = -dy/L*offset, dx/L*offset
+
+    ax.plot([x1,x1+nx],[y1,y1+ny], color=DIM_C, lw=0.8, zorder=7)
+    ax.plot([x2,x2+nx],[y2,y2+ny], color=DIM_C, lw=0.8, zorder=7)
+    ax.annotate("",xy=(x2+nx,y2+ny),xytext=(x1+nx,y1+ny),
+                arrowprops=dict(arrowstyle="<->",color=DIM_C,lw=1.0),zorder=7)
+    ax.text(mx+nx*1.15,my+ny*1.15, label, ha="center", va="center",
+            fontsize=6.5, color=DIM_C,
+            bbox=dict(boxstyle="round,pad=0.12",facecolor="white",edgecolor="none",alpha=0.85),zorder=8)
 
 
-def _draw_dimension(ax, x1, y1, x2, y2, value_str: str,
-                    offset: float = 2.5, color: str = DIM_COLOR):
-    """Dimension line with arrows at ends"""
-    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-    dx, dy = x2 - x1, y2 - y1
-    length = math.hypot(dx, dy)
-    if length < 0.1:
-        return
-
-    # Perpendicular direction for offset
-    nx, ny = -dy / length, dx / length
-    ox, oy = nx * offset, ny * offset
-
-    # Extension lines
-    ax.plot([x1, x1 + ox], [y1, y1 + oy], color=color, lw=0.8, zorder=6)
-    ax.plot([x2, x2 + ox], [y2, y2 + oy], color=color, lw=0.8, zorder=6)
-
-    # Dimension line with arrows
-    ax.annotate(
-        "", xy=(x2 + ox, y2 + oy), xytext=(x1 + ox, y1 + oy),
-        arrowprops=dict(arrowstyle="<->", color=color, lw=1.0),
-        zorder=6
-    )
-
-    # Text
-    ax.text(
-        mx + ox * 1.2, my + oy * 1.2, value_str,
-        ha="center", va="center",
-        fontsize=FONT_DIM["size"],
-        color=color,
-        bbox=dict(boxstyle="round,pad=0.15", facecolor="white", edgecolor="none", alpha=0.8),
-        zorder=7
-    )
+# ── North Arrow ──────────────────────────────────────────────────
+def _north_arrow(ax, x, y, size=3.5):
+    ax.annotate("",xy=(x,y+size),xytext=(x,y),
+                arrowprops=dict(arrowstyle="->",color=NORTH_C,lw=2.2),zorder=12)
+    ax.text(x,y+size+0.7,"N",ha="center",va="bottom",
+            fontsize=11,fontweight="bold",color=NORTH_C,zorder=12)
+    ax.add_patch(plt.Circle((x,y),0.4,color=NORTH_C,zorder=12))
 
 
-def _draw_plot_border(ax, length: float, breadth: float, cx: float, cy: float, angle: float):
-    """Plot boundary — thick outer wall"""
-    corners = _rect_corners(0, 0, length, breadth)
-    rot = _rotate_corners(corners, cx, cy, angle)
-    border = Polygon(rot, closed=True, facecolor="none",
-                     edgecolor="#1a1a2e", linewidth=5, zorder=1)
-    ax.add_patch(border)
+# ── Vastu Score Badge ────────────────────────────────────────────
+def _vastu_badge(ax, score_pct, x, y):
+    color = "#1E8449" if score_pct>=70 else "#D35400" if score_pct>=45 else "#C0392B"
+    ax.text(x,y,f"Vastu {score_pct}%",fontsize=8.5,fontweight="bold",color=color,
+            bbox=dict(boxstyle="round,pad=0.4",facecolor="white",
+                      edgecolor=color,lw=1.8,alpha=0.95),zorder=12)
 
 
-def _draw_legend(ax, rooms: List[Dict]):
-    """Compact room type legend"""
-    seen_types = {}
+# ── Legend ───────────────────────────────────────────────────────
+def _legend(ax, rooms):
+    seen = {}
     for r in rooms:
-        t = r.get("type", "")
-        if t not in seen_types:
-            seen_types[t] = r.get("color", "#ccc")
-
-    legend_handles = [
-        mpatches.Patch(facecolor=col, edgecolor=WALL_COLOR, label=t.replace("_", " ").title())
-        for t, col in seen_types.items()
-    ]
-    ax.legend(
-        handles=legend_handles,
-        loc="lower left",
-        fontsize=7,
-        framealpha=0.9,
-        edgecolor="#cccccc",
-        title="Room Types",
-        title_fontsize=7,
-    )
+        t = r.get("type","")
+        if t not in seen: seen[t]=r.get("color","#ccc")
+    handles = [mpatches.Patch(facecolor=c,edgecolor=WALL_C,
+               label=t.replace("_"," ").title()) for t,c in seen.items()]
+    ax.legend(handles=handles,loc="lower left",fontsize=6.5,
+              framealpha=0.92,edgecolor="#bbb",
+              title="Room Types",title_fontsize=6.5)
 
 
-# ─────────────────────────────────────────────────────────────────
-# Main Renderer
-# ─────────────────────────────────────────────────────────────────
+# ── Main Renderer ────────────────────────────────────────────────
+def render_floor_plan(length, breadth, rooms, facing, bhk,
+                      vastu_pct=0, show_dimensions=True,
+                      show_vastu_grid=False, fig_w=15, fig_h=11):
 
-def render_floor_plan(
-    length: float,
-    breadth: float,
-    rooms: List[Dict],
-    facing: str,
-    bhk: str,
-    show_dimensions: bool = True,
-    show_vastu_overlay: bool = False,
-    fig_w: float = 14,
-    fig_h: float = 10,
-) -> plt.Figure:
-    """
-    Complete floor plan render karo.
+    ANGLE = {"North":0,"East":90,"South":180,"West":270}[facing]
+    cx, cy = length/2, breadth/2
 
-    Args:
-        length, breadth : plot size in feet
-        rooms           : list of room dicts from layout_engine
-        facing          : "North" | "East" | "South" | "West"
-        bhk             : BHK label for title
-        show_dimensions : dimension lines show karo?
-        show_vastu_overlay: Vastu zone grid show karo?
-
-    Returns:
-        matplotlib Figure
-    """
-    FACING_ANGLE = {"North": 0.0, "East": 90.0, "South": 180.0, "West": 270.0}
-    angle = FACING_ANGLE[facing]
-    cx, cy = length / 2, breadth / 2
-
-    # ── Figure Setup ──────────────────────────────────────────────
-    fig = plt.figure(figsize=(fig_w, fig_h), facecolor=BG_COLOR)
-    gs  = GridSpec(1, 1, figure=fig, left=0.08, right=0.92, top=0.88, bottom=0.08)
-    ax  = fig.add_subplot(gs[0, 0])
-
-    ax.set_facecolor(BG_COLOR)
-    ax.set_xlim(-4, length + 8)
-    ax.set_ylim(-4, breadth + 8)
+    fig, ax = plt.subplots(figsize=(fig_w,fig_h))
+    fig.patch.set_facecolor(BG_C)
+    ax.set_facecolor(BG_C)
+    ax.set_xlim(-5, length+10)
+    ax.set_ylim(-5, breadth+10)
     ax.set_aspect("equal")
-    ax.grid(True, color=GRID_COLOR, linestyle="--", linewidth=0.5, alpha=0.6, zorder=0)
+    ax.grid(True, color=GRID_C, ls="--", lw=0.4, alpha=0.55, zorder=0)
 
-    # ── Vastu Zone Overlay (optional) ─────────────────────────────
-    if show_vastu_overlay:
-        zw, zh = length / 3, breadth / 3
-        zone_labels = [
-            ("SW", 0, 0), ("S", 1, 0), ("SE", 2, 0),
-            ("W", 0, 1),  ("C", 1, 1), ("E", 2, 1),
-            ("NW", 0, 2), ("N", 1, 2), ("NE", 2, 2),
-        ]
-        for zlabel, col, row in zone_labels:
-            zx, zy = col * zw, row * zh
-            c = _rotate_corners(_rect_corners(zx, zy, zw, zh), cx, cy, angle)
-            zpoly = Polygon(c, facecolor="#fffde7", edgecolor="#fbc02d",
-                            linewidth=0.8, alpha=0.3, linestyle=":", zorder=1)
-            ax.add_patch(zpoly)
-            zcx = sum(p[0] for p in c) / 4
-            zcy = sum(p[1] for p in c) / 4
-            ax.text(zcx, zcy, zlabel, ha="center", va="center",
-                    fontsize=7, color="#f57f17", alpha=0.6, style="italic")
+    # Vastu zone grid (optional)
+    if show_vastu_grid:
+        zw, zh = length/3, breadth/3
+        for col in range(3):
+            for row in range(3):
+                pts = _rot_corners(_rect_pts(col*zw,row*zh,zw,zh),cx,cy,ANGLE)
+                ax.add_patch(Polygon(pts,facecolor="#fffde7",edgecolor="#f9ca24",
+                                     lw=0.6,alpha=0.25,linestyle=":",zorder=1))
+                labels = {(0,0):"SW",(1,0):"S",(2,0):"SE",(0,1):"W",(1,1):"C",
+                          (2,1):"E",(0,2):"NW",(1,2):"N",(2,2):"NE"}
+                zcx = sum(p[0] for p in pts)/4
+                zcy = sum(p[1] for p in pts)/4
+                ax.text(zcx,zcy,labels[(col,row)],ha="center",va="center",
+                        fontsize=7,color="#e67e22",alpha=0.6,style="italic")
 
-    # ── Plot Border ───────────────────────────────────────────────
-    _draw_plot_border(ax, length, breadth, cx, cy, angle)
+    # Plot boundary — double line for outer wall
+    border_pts = _rot_corners(_rect_pts(0,0,length,breadth),cx,cy,ANGLE)
+    ax.add_patch(Polygon(border_pts,closed=True,facecolor="none",
+                         edgecolor=WALL_C,lw=5.5,zorder=1))
+    ax.add_patch(Polygon(border_pts,closed=True,facecolor="none",
+                         edgecolor="#85929E",lw=1.5,linestyle="--",
+                         zorder=1,alpha=0.4))
 
-    # ── Draw Rooms ────────────────────────────────────────────────
-    for room in rooms:
-        _draw_room(ax, room, cx, cy, angle, WALL_LW)
+    # Rooms
+    for r in rooms: _draw_room(ax, r, cx, cy, ANGLE)
+    # Windows (under doors)
+    for r in rooms:
+        for w in r.get("windows",[]): _draw_window(ax, w, cx, cy, ANGLE)
+    # Doors
+    for r in rooms:
+        for d in r.get("doors",[]): _draw_door(ax, d, cx, cy, ANGLE)
 
-    # ── Draw Windows (under doors) ────────────────────────────────
-    for room in rooms:
-        for window in room.get("windows", []):
-            _draw_window(ax, window, room, cx, cy, angle)
-
-    # ── Draw Doors ────────────────────────────────────────────────
-    for room in rooms:
-        for door in room.get("doors", []):
-            _draw_door(ax, door, room, cx, cy, angle)
-
-    # ── Dimension Lines ───────────────────────────────────────────
+    # Dimensions
     if show_dimensions:
-        # Plot overall dimensions
-        c_tl = _rotate_point(0, 0, cx, cy, angle)
-        c_tr = _rotate_point(length, 0, cx, cy, angle)
-        c_bl = _rotate_point(0, breadth, cx, cy, angle)
+        c00 = _rot(0,0,cx,cy,ANGLE)
+        c10 = _rot(length,0,cx,cy,ANGLE)
+        c01 = _rot(0,breadth,cx,cy,ANGLE)
+        _dim(ax,*c00,*c10, f"{length:.0f} ft", offset=-3.2)
+        _dim(ax,*c00,*c01, f"{breadth:.0f} ft", offset=-3.2)
 
-        _draw_dimension(ax, c_tl[0], c_tl[1], c_tr[0], c_tr[1],
-                        f"{length:.0f} ft", offset=-3.0)
-        _draw_dimension(ax, c_tl[0], c_tl[1], c_bl[0], c_bl[1],
-                        f"{breadth:.0f} ft", offset=-3.0)
+        for r in rooms:
+            if r.get("type") in ("living","bedroom"):
+                rx0,ry0 = _rot(r["x"],r["y"],cx,cy,ANGLE)
+                rx1,ry1 = _rot(r["x"]+r["w"],r["y"],cx,cy,ANGLE)
+                _dim(ax,rx0,ry0,rx1,ry1, f'{r["w"]:.0f}\'', offset=0.7)
 
-        # Individual room width labels
-        for room in rooms:
-            if room["type"] in ("living", "master_bed", "bedroom"):
-                rx0, ry0 = _rotate_point(room["x"], room["y"], cx, cy, angle)
-                rx1, ry1 = _rotate_point(room["x"] + room["w"], room["y"], cx, cy, angle)
-                _draw_dimension(ax, rx0, ry0, rx1, ry1,
-                                f'{room["w"]:.0f}\'', offset=0.8, color="#888888")
+    # North arrow + Vastu badge
+    _north_arrow(ax, length+7, breadth-7)
+    _vastu_badge(ax, vastu_pct, length+1, breadth+3)
 
-    # ── North Arrow ───────────────────────────────────────────────
-    # Always top-right, no rotation needed for compass
-    _draw_north_arrow(ax, length + 5, breadth - 6)
+    # Legend
+    _legend(ax, rooms)
 
-    # ── Vastu Score Panel ─────────────────────────────────────────
-    vastu_audit  = audit_layout(rooms, length, breadth)
-    vastu_overall = overall_vastu_score(vastu_audit)
-    score_color   = "#27AE60" if vastu_overall >= 0.7 else "#F39C12" if vastu_overall >= 0.4 else "#E74C3C"
+    # Title
+    area = length*breadth
+    fig.text(0.5, 0.95, f"Modern {bhk} Floor Plan  •  {facing} Facing",
+             ha="center", fontsize=14, fontweight="bold", color="#1C2833")
+    fig.text(0.5, 0.92,
+             f"Plot: {length:.0f}×{breadth:.0f} ft  |  Area: {area:.0f} sq ft  |  Scale: 1:50",
+             ha="center", fontsize=8.5, color="#555")
 
-    score_text = f"Vastu Score: {vastu_overall * 100:.0f}%"
-    ax.text(
-        length + 1, breadth + 3, score_text,
-        fontsize=9, color=score_color, fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
-                  edgecolor=score_color, linewidth=1.5, alpha=0.92),
-        zorder=10
-    )
-
-    # ── Legend ────────────────────────────────────────────────────
-    _draw_legend(ax, rooms)
-
-    # ── Title & Subtitle ──────────────────────────────────────────
-    total_area = length * breadth
-    title_str    = f"Modern {bhk} Floor Plan  •  {facing} Facing"
-    subtitle_str = f"Plot: {length:.0f} × {breadth:.0f} ft  |  Total Area: {total_area:.0f} sq ft  |  Scale: 1:50 approx"
-
-    fig.text(0.5, 0.94, title_str,
-             ha="center", va="center",
-             fontsize=FONT_TITLE["size"],
-             fontweight=FONT_TITLE["weight"],
-             color="#1a1a2e")
-    fig.text(0.5, 0.91, subtitle_str,
-             ha="center", va="center",
-             fontsize=FONT_SUBTITLE["size"],
-             color="#555555")
-
-    # ── Axis Labels ───────────────────────────────────────────────
-    ax.set_xlabel("Length (feet)", fontsize=8, color=DIM_COLOR)
-    ax.set_ylabel("Breadth (feet)", fontsize=8, color=DIM_COLOR)
-    ax.tick_params(labelsize=7, colors=DIM_COLOR)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.90])
+    ax.set_xlabel("Length (feet)", fontsize=7.5, color=DIM_C)
+    ax.set_ylabel("Breadth (feet)", fontsize=7.5, color=DIM_C)
+    ax.tick_params(labelsize=6.5, colors=DIM_C)
+    plt.tight_layout(rect=[0,0,1,0.91])
     return fig
 
 
-# ─────────────────────────────────────────────────────────────────
-# Export Helpers
-# ─────────────────────────────────────────────────────────────────
+# ── Exports ──────────────────────────────────────────────────────
+def to_pdf(fig, dpi=200):
+    buf=io.BytesIO(); fig.savefig(buf,format="pdf",dpi=dpi,bbox_inches="tight",
+                                   facecolor=BG_C); buf.seek(0); return buf.getvalue()
 
-def figure_to_pdf_bytes(fig: plt.Figure, dpi: int = 200) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="pdf", dpi=dpi, bbox_inches="tight", facecolor=BG_COLOR)
-    buf.seek(0)
-    return buf.getvalue()
+def to_png(fig, dpi=150):
+    buf=io.BytesIO(); fig.savefig(buf,format="png",dpi=dpi,bbox_inches="tight",
+                                   facecolor=BG_C); buf.seek(0); return buf.getvalue()
 
-
-def figure_to_png_bytes(fig: plt.Figure, dpi: int = 150) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor=BG_COLOR)
-    buf.seek(0)
-    return buf.getvalue()
-
-
-def figure_to_svg_bytes(fig: plt.Figure) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="svg", bbox_inches="tight", facecolor=BG_COLOR)
-    buf.seek(0)
-    return buf.getvalue()
+def to_svg(fig):
+    buf=io.BytesIO(); fig.savefig(buf,format="svg",bbox_inches="tight",
+                                   facecolor=BG_C); buf.seek(0); return buf.getvalue()
